@@ -1,8 +1,8 @@
-import os
+# import os
 from db.db_schemas import CreateUserPayload, DiscordUserPayload, UpdateUserPayload
 from db.db_controller import create_user, get_user, update_user, delete_user
 from pydantic import ValidationError
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError
 
 async def handle_error(websocket, message: str, interaction_id: str = None):
@@ -12,11 +12,11 @@ async def handle_error(websocket, message: str, interaction_id: str = None):
         "message": message
     })
 
-load_dotenv()
-TOKEN = os.getenv('APITOKEN')
+# load_dotenv()
+# TOKEN = os.getenv('APITOKEN')
 
-if not TOKEN:
-    raise ValueError("FATAL ERROR: Environment variable 'TOKEN' is not set in .env file.")
+# if not TOKEN:
+#    raise ValueError("FATAL ERROR: Environment variable 'TOKEN' is not set in .env file.")
 
 async def handle_create(websocket, payload, interaction_id):
     try:
