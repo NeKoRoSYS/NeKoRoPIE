@@ -76,22 +76,16 @@ class Server:
         self.HEADER = os.getenv('CLIENTHEADER', '')
         self.VALKEYURL = os.getenv('VALKEYURL', '')
         self.JWTSECRET = os.getenv('JWTSECRET', '')
-        if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET:
+        self.ORIGINS = os.getenv("ORIGINS").split(",")
+        if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.:
             raise ValueError("FATAL ERROR: Environment variables are not set or empty in .env file.")
         
-        origins = [
-            "http://core:8000",
-            "http://localhost:8000",
-            "http://localhost:3000", # react
-            "http://localhost:5173", # vite
-            "http://127.0.0.1:5173"
-        ]
         self.ROUTES = ROUTES
         self.app = FastAPI(lifespan=self.lifespan)
         self.app.include_router(rest_router)
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=origins,
+            allow_origins=self.ORIGINS,
             allow_credentials=True,
             allow_methods=["GET", "POST", "PUT", "DELETE"], # do NOT allow other methods unless explicitly defined in the codebase
             allow_headers=["Client-ID", "Authorization"], # same for headers
@@ -358,6 +352,9 @@ if __name__ == "__main__":
         "main:app", 
         host="0.0.0.0", 
         port=8000,
+        workers=4,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
         ws_ping_interval=20.0,
         ws_ping_timeout=20.0,
         ws_max_size=1048576
