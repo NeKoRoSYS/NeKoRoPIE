@@ -288,7 +288,7 @@ class Server:
             while True:
                 message = await websocket.receive_text()
                 
-                if len(message) > 65536:  # 64 KB limit
+                if len(message) > 1048576:  # 1 MB limit
                     logging.warning(f"Payload from {client_id} exceeded limits.")
                     continue
 
