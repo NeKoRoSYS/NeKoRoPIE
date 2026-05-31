@@ -6,7 +6,7 @@ load_dotenv()
 URL = os.getenv('DBURI')
 
 if not URL:
-    raise ValueError("FATAL ERROR: Environment variable 'URL' is not set in .env file.")
+    raise ValueError("FATAL ERROR: Environment variable 'DBURI' is not set in .env file.")
         
 
 client = AsyncIOMotorClient(URL)
