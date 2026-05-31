@@ -1,4 +1,3 @@
-from concurrent.futures import ProcessPoolExecutor
 import os # used to load env variables
 import time # used for dql
 import uuid # random identifiers
@@ -100,7 +99,6 @@ class Server:
         self.vk = None
         self.limiter = None
         self.pubsub_task = None
-        self.executor = ProcessPoolExecutor(max_workers=os.cpu_count() - 1)
         
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -116,7 +114,6 @@ class Server:
             self.pubsub_task.cancel()
         if self.dlq_cleanup_task:
             self.dlq_cleanup_task.cancel()
-        self.executor.shutdown(wait=True)
         await asyncio.gather(self.pubsub_task, self.dlq_cleanup_task, return_exceptions=True)
         await self.vk.close()
     
@@ -136,8 +133,11 @@ class Server:
                         messages.append(msg)
                         
                     if messages:
-                        await asyncio.to_thread(self._write_dlq_logs, key, messages)
-                        logging.warning(f"Archived {len(messages)} dropped messages from {key}")
+                        try:
+                            await asyncio.to_thread(self._write_dlq_logs, key, messages)
+                            logging.warning(f"Archived {len(messages)} dropped messages from {key}")
+                        except Exception as io_err:
+                            logging.error(f"Failed to write DLQ logs to disk: {io_err}")
                         
             except asyncio.CancelledError:
                 break
@@ -161,9 +161,9 @@ class Server:
                     target_id = packet.get("target_client_id")
                     payload_data = packet.get("data")
                     
-                    target_socket = self.local_connections.get(target_id)
-                    if target_socket:
-                        await target_socket.send_bytes(orjson.dumps(payload_data))
+                    target_queue = self.local_connections.get(target_id)
+                    if target_queue:
+                        await target_queue.put(orjson.dumps(payload_data))
                     else:
                         logging.warning(f"Client {target_id} offline. Pushing to DLQ.")
                         dlq_key = f"dlq:{target_id}"
@@ -187,7 +187,7 @@ class Server:
         """
         if target_client_id in self.local_connections:
             try:
-                await self.local_connections[target_client_id].send_bytes(orjson.dumps(payload_data))
+                await self.local_connections[target_client_id].put(orjson.dumps(payload_data))
                 return True
             except Exception as e:
                 logging.error(f"Failed to send local message to {target_client_id}: {e}")
@@ -220,6 +220,7 @@ class Server:
         return True
         
     async def websocket_endpoint(self, websocket: WebSocket):
+        client_id = None
         logging.info("New WebSocket connection established.")
         
         await websocket.accept()
@@ -262,9 +263,22 @@ class Server:
                 await websocket.close(code=1008, reason="Database Handshake Rejected")
                 return
 
-            self.local_connections[client_id] = websocket
+            egress_queue = asyncio.Queue()
+            self.local_connections[client_id] = egress_queue
             await self.vk.set(f"client_route:{client_id}", self.instance_id)
             logging.info(f"Client {client_id} authenticated and routed to {self.instance_id}.")
+
+            async def socket_writer():
+                try:
+                    while True:
+                        msg = await egress_queue.get()
+                        await websocket.send_bytes(msg)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logging.error(f"Socket writer error for {client_id}: {e}")
+
+            writer_task = asyncio.create_task(socket_writer())
 
             dlq_key = f"dlq:{client_id}"
             queued_msgs = await self.vk.lrange(dlq_key, 0, -1)
@@ -337,10 +351,14 @@ class Server:
         except Exception as e:
             logging.exception("An unexpected WebSocket connection error occurred:")
         finally:
-            self.local_connections.pop(client_id, None)
-            lua_script = "if valkey.call('get', KEYS[1]) == ARGV[1] then return valkey.call('del', KEYS[1]) else return 0 end"
-            await self.vk.eval(lua_script, 1, f"client_route:{client_id}", self.instance_id)
-            await self.vk.delete(f"rate_limit:{client_id}")
+            if 'writer_task' in locals():
+                writer_task.cancel()
+            
+            if client_id:
+                self.local_connections.pop(client_id, None)
+                lua_script = "if valkey.call('get', KEYS[1]) == ARGV[1] then return valkey.call('del', KEYS[1]) else return 0 end"
+                await self.vk.eval(lua_script, 1, f"client_route:{client_id}", self.instance_id)
+                await self.vk.delete(f"rate_limit:{client_id}")
 
 server = Server()
 app = server.app
