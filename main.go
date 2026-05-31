@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+    "net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,7 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go"
 
 	"nekoropie/api/rest"
 	"nekoropie/api/websockets"
@@ -39,13 +40,13 @@ type HandshakePayload struct {
 }
 
 type DistributedRateLimiter struct {
-	rdb        *redis.Client
+	vk         valkey.Client
 	maxActions int
 	timeframe  float64
-	script     *redis.Script
+	script     valkey.Lua
 }
 
-func NewDistributedRateLimiter(rdb *redis.Client, maxActions int, timeframe float64) *DistributedRateLimiter {
+func NewDistributedRateLimiter(vk valkey.Client, maxActions int, timeframe float64) *DistributedRateLimiter {
 	luaScript := `
 		-- KEYS[1]: the specific rate limit key for this client
 		-- ARGV[1]: current timestamp (used as both score and member)
@@ -64,10 +65,10 @@ func NewDistributedRateLimiter(rdb *redis.Client, maxActions int, timeframe floa
 		end
 	`
 	return &DistributedRateLimiter{
-		rdb:        rdb,
+		vk:         vk,
 		maxActions: maxActions,
 		timeframe:  timeframe,
-		script:     redis.NewScript(luaScript),
+		script:     valkey.NewLuaScript(luaScript),
 	}
 }
 
@@ -77,12 +78,22 @@ func (l *DistributedRateLimiter) IsAllowed(ctx context.Context, clientID string)
 	clearBefore := now - l.timeframe
 	ttl := int(l.timeframe) + 2
 
-	result, err := l.script.Run(ctx, l.rdb, []string{key}, now, clearBefore, l.maxActions, ttl).Result()
+	result := l.script.Exec(ctx, l.vk,
+                []string{key},
+                []string{
+                        fmt.Sprintf("%f", now),
+                        fmt.Sprintf("%f", clearBefore),
+                        fmt.Sprintf("%d", l.maxActions),
+                        fmt.Sprintf("%d", ttl),
+                },
+        )
+
+	val, err := result.AsInt64()
 	if err != nil {
 		return false, err
 	}
 
-	return result.(int64) == 1, nil
+	return val == 1, nil
 }
 
 var upgrader = websocket.Upgrader{
@@ -114,7 +125,7 @@ type Server struct {
 	ChannelName string
 
 	Router *chi.Mux
-	RDB    *redis.Client
+	VK     valkey.Client
 	Limit  *DistributedRateLimiter
 
 	localConnections map[string]*WSClient
@@ -166,13 +177,24 @@ func (s *Server) Start(ctx context.Context) {
 	db.InitializeAll()
 
 	log.Println("Connecting to Valkey...")
-	opts, err := redis.ParseURL(s.ValkeyURL)
+	u, err := url.Parse(s.ValkeyURL)
 	if err != nil {
-		log.Fatalf("Invalid Valkey URL: %v", err)
+		log.Fatalf("Invalid Valkey URL format: %v", err)
 	}
-	s.RDB = redis.NewClient(opts)
+	
+	addr := u.Host
+        password, _ := u.User.Password()
+        clientOpt := valkey.ClientOption{
+                InitAddress: []string{addr},
+                Password:    password,
+        }
+        vkClient, err := valkey.NewClient(clientOpt)
+        if err != nil {
+                log.Fatalf("Failed to connect to Valkey: %v", err)
+        }
+        s.VK = vkClient
 
-	s.Limit = NewDistributedRateLimiter(s.RDB, 25, 1.0)
+	s.Limit = NewDistributedRateLimiter(s.VK, 25, 1.0)
 
 	s.wg.Add(2)
 	go s.dlqArchiver(ctx)
@@ -191,30 +213,37 @@ func (s *Server) dlqArchiver(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			iter := s.RDB.Scan(ctx, 0, "dlq:*", 0).Iterator()
-			for iter.Next(ctx) {
-				key := iter.Val()
-				var messages [][]byte
+			var cursor uint64
+			for {
+				entry, err := s.VK.Do(ctx, s.VK.B().Scan().Cursor(cursor).Match("dlq:*").Build()).AsScanEntry()
+				if err != nil {
+					log.Printf("DLQ scan error: %v", err)
+					break
+				}
 
-				for {
-					msg, err := s.RDB.LPop(ctx, key).Bytes()
-					if err == redis.Nil {
-						break
-					} else if err != nil {
-						log.Printf("DLQ LPop error: %v", err)
-						break
+				for _, key := range entry.Elements {
+					var messages [][]byte
+					for {
+						msgStr, err := s.VK.Do(ctx, s.VK.B().Lpop().Key(key).Build()).ToString()
+						if valkey.IsValkeyNil(err) {
+							break
+						} else if err != nil {
+							log.Printf("DLQ LPop error: %v", err)
+							break
+						}
+						messages = append(messages, []byte(msgStr))
 					}
-					messages = append(messages, msg)
+
+					if len(messages) > 0 {
+						go s.writeDLQLogs(key, messages)
+						log.Printf("Archived %d dropped messages from %s", len(messages), key)
+					}
 				}
 
-				if len(messages) > 0 {
-					go s.writeDLQLogs(key, messages)
-					log.Printf("Archived %d dropped messages from %s", len(messages), key)
+				if entry.Cursor == 0 {
+					break
 				}
-			}
-
-			if err := iter.Err(); err != nil {
-				log.Printf("DLQ scan error: %v", err)
+				cursor = entry.Cursor
 			}
 		}
 	}
@@ -241,79 +270,83 @@ func (s *Server) writeDLQLogs(key string, messages [][]byte) {
 
 func (s *Server) valkeyPubSubListener(ctx context.Context) {
 	defer s.wg.Done()
-	pubsub := s.RDB.Subscribe(ctx, s.ChannelName)
-	defer pubsub.Close()
+
 	log.Printf("Instance %s subscribed to routing bus channel: %s", s.InstanceID, s.ChannelName)
-	ch := pubsub.Channel()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Valkey Pub/Sub listener routine shutdown.")
+	
+	err := s.VK.Receive(ctx, s.VK.B().Subscribe().Channel(s.ChannelName).Build(), func(msg valkey.PubSubMessage) {
+		var packet map[string]interface{}
+		if err := json.Unmarshal([]byte(msg.Message), &packet); err != nil {
 			return
-		case msg := <-ch:
-			var packet map[string]interface{}
-			if err := json.Unmarshal([]byte(msg.Payload), &packet); err != nil {
-				log.Printf("Failed to unmarshal pubsub msg: %v", err)
-				continue
-			}
+		}
 
-			targetID, ok1 := packet["target_client_id"].(string)
-			payloadData, ok2 := packet["data"]
-			if !ok1 || !ok2 {
-				continue
-			}
+		targetID, ok1 := packet["target_client_id"].(string)
+		payloadData, ok2 := packet["data"]
+		if !ok1 || !ok2 {
+			return
+		}
 
-			s.connMutex.RLock()
-			client, exists := s.localConnections[targetID]
-			s.connMutex.RUnlock()
+		s.connMutex.RLock()
+		client, exists := s.localConnections[targetID]
+		s.connMutex.RUnlock()
 
-			if exists {
-				bytesData, _ := json.Marshal(payloadData)
-				client.SendBytes(bytesData)
-			} else {
-				log.Printf("Client %s offline. Pushing to DLQ.", targetID)
-				dlqKey := fmt.Sprintf("dlq:%s", targetID)
-				payloadBytes, _ := json.Marshal(payloadData)
-				
-				pipe := s.RDB.Pipeline()
-				pipe.RPush(ctx, dlqKey, payloadBytes)
-				pipe.LTrim(ctx, dlqKey, -100, -1)
-				pipe.Exec(ctx)
+		if exists {
+			bytesData, _ := json.Marshal(payloadData)
+			client.SendBytes(bytesData)
+		} else {
+			dlqKey := fmt.Sprintf("dlq:%s", targetID)
+			payloadBytes, _ := json.Marshal(payloadData)
 
-				_, err := pipe.Exec(ctx)
-				if err != nil {
-                    log.Printf("DLQ push failed: %v", err)
-                }
+			cmds := make([]valkey.Completed, 0, 2)
+			cmds = append(cmds, s.VK.B().Rpush().Key(dlqKey).Element(string(payloadBytes)).Build())
+			cmds = append(cmds, s.VK.B().Ltrim().Key(dlqKey).Start(-100).Stop(-1).Build())
+			
+			for _, err := range s.VK.DoMulti(ctx, cmds...) {
+				if err.Error() != nil {
+					log.Printf("DLQ push failed: %v", err.Error())
+				}
 			}
 		}
+	})
+
+	if err != nil {
+		log.Printf("Valkey Pub/Sub listener routine shutdown: %v", err)
 	}
 }
 
 func (s *Server) RouteMessage(ctx context.Context, targetClientID string, payloadData interface{}) bool {
-        s.connMutex.RLock()
-        client, exists := s.localConnections[targetClientID]
-        s.connMutex.RUnlock()
-        payloadBytes, _ := json.Marshal(payloadData)
-        if exists {
-                if err := client.SendBytes(payloadBytes); err != nil {
-                        log.Printf("Failed to send local message to %s: %v", targetClientID, err)
-                        return false
-                }
-                return true
-        }
-        targetInstanceID, err := s.RDB.Get(ctx, fmt.Sprintf("client_route:%s", targetClientID)).Result()
-        if err == nil && targetInstanceID != "" {
-                packet := map[string]interface{}{
-                        "target_client_id": targetClientID,
-                        "data":             payloadData,
-                }
-                packetBytes, _ := json.Marshal(packet)
-                s.RDB.Publish(ctx, fmt.Sprintf("ws_instance:%s", targetInstanceID), packetBytes)
-                return true
-        }
-        log.Printf("Could not route message: Client %s is offline or not mapped.", targetClientID)
-        return false
+	s.connMutex.RLock()
+	client, exists := s.localConnections[targetClientID]
+	s.connMutex.RUnlock()
+
+	payloadBytes, _ := json.Marshal(payloadData)
+
+	if exists {
+		if err := client.SendBytes(payloadBytes); err != nil {
+			log.Printf("Failed to send local message to %s: %v", targetClientID, err)
+			return false
+		}
+		return true
+	}
+
+	targetInstanceID, err := s.VK.Do(ctx, s.VK.B().Get().Key(fmt.Sprintf("client_route:%s", targetClientID)).Build()).ToString()
+	
+	if err == nil && targetInstanceID != "" {
+		packet := map[string]interface{}{
+			"target_client_id": targetClientID,
+			"data":             payloadData,
+		}
+		packetBytes, _ := json.Marshal(packet)
+		
+		err = s.VK.Do(ctx, s.VK.B().Publish().Channel(fmt.Sprintf("ws_instance:%s", targetInstanceID)).Message(string(packetBytes)).Build()).Error()
+		if err != nil {
+			log.Printf("Failed to publish message to %s: %v", targetInstanceID, err)
+			return false
+		}
+		return true
+	}
+
+	log.Printf("Could not route message: Client %s is offline or not mapped.", targetClientID)
+	return false
 }
 
 func (s *Server) HandleHandshake(conn *websocket.Conn, payload []byte, interactionID string) bool {
@@ -410,16 +443,16 @@ func (s *Server) WebSocketEndpoint(w http.ResponseWriter, r *http.Request) {
 	s.connMutex.Unlock()
 
 	ctx := context.Background()
-	s.RDB.Set(ctx, fmt.Sprintf("client_route:%s", clientID), s.InstanceID, 0)
-	log.Printf("Client %s authenticated and routed to %s.", clientID, s.InstanceID)
+
+	s.VK.Do(ctx, s.VK.B().Set().Key(fmt.Sprintf("client_route:%s", clientID)).Value(s.InstanceID).Build())
 
 	dlqKey := fmt.Sprintf("dlq:%s", clientID)
-	queuedMsgs, _ := s.RDB.LRange(ctx, dlqKey, 0, -1).Result()
-	if len(queuedMsgs) > 0 {
+	queuedMsgs, err := s.VK.Do(ctx, s.VK.B().Lrange().Key(dlqKey).Start(0).Stop(-1).Build()).AsStrSlice()
+	if err == nil && len(queuedMsgs) > 0 {
 		for _, msg := range queuedMsgs {
 			wsClient.SendBytes([]byte(msg))
 		}
-		s.RDB.Del(ctx, dlqKey)
+		s.VK.Do(ctx, s.VK.B().Del().Key(dlqKey).Build())
 	}
 
 	pingerDone := make(chan struct{})
@@ -447,9 +480,10 @@ func (s *Server) WebSocketEndpoint(w http.ResponseWriter, r *http.Request) {
 		delete(s.localConnections, clientID)
 		s.connMutex.Unlock()
 
-		script := `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`
-		s.RDB.Eval(ctx, script, []string{fmt.Sprintf("client_route:%s", clientID)}, s.InstanceID)
-		s.RDB.Del(ctx, fmt.Sprintf("rate_limit:%s", clientID))
+		script := valkey.NewLuaScript(`if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`)
+		script.Exec(ctx, s.VK, []string{fmt.Sprintf("client_route:%s", clientID)}, []string{s.InstanceID})
+		
+		s.VK.Do(ctx, s.VK.B().Del().Key(fmt.Sprintf("rate_limit:%s", clientID)).Build())
 	}()
 
 	for {
@@ -513,11 +547,11 @@ func main() {
 
 	<-c
 	log.Println("\nGracefully shutting down...")
+	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	
 	httpServer.Shutdown(shutdownCtx)
-	cancel()
 	server.wg.Wait()
-	server.RDB.Close()
+	server.VK.Close()
 }
