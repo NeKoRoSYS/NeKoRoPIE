@@ -12,4 +12,4 @@ Every custom logic starts at `./api/rest.go` and `./api/websockets.go`. Due to i
 
 "How does it compare to Django?" Django is a Swiss Army Knife. NeKoRoPIE takes one blade from that Swiss Army Knife and sharpens it for absolute reliability. If for some reason you don't want to use Django and prefer to build your own framework, NeKoRoPIE will suit your needs.
 
-"How does this Go version compare to the main Python implementation?" Go handles concurrency by default and it's generally much faster than Python. Use this branch if you're an "eugh Python so slow" typa guy.
+"How does this Go version compare to the main Python implementation?" Go handles concurrency natively and it's generally much faster than the Python backend. Use this branch if you're an "eugh Python so slow" typa guy.
