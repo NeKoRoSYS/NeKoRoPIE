@@ -12,7 +12,7 @@ if not ENGINE:
 
 class DatabaseFactory:
     def __init__(self):
-        self.db_engine = os.getenv(ENGINE, "mongodb").lower()
+        self.db_engine = ENGINE.lower()
         
         if self.db_engine == "mongodb":
             self.user_repo = MongoUserRepository(user_collection)
