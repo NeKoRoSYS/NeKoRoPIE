@@ -100,7 +100,7 @@ class Server:
         self.vk = None
         self.limiter = None
         self.pubsub_task = None
-        self.executor = ProcessPoolExecutor(max_workers=4)
+        self.executor = ProcessPoolExecutor(max_workers=os.cpu_count() - 1)
         
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
