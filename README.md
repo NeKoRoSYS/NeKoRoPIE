@@ -2,7 +2,7 @@
 
 i serve u pie
 
-NeKoRoPIE is a ligthweight, secure, horizontally-scalable, and unopinionated Python backend that can handle REST and WebSocket endpoints. It can also perform database querying and other operations.
+NeKoRoPIE is a lightweight, secure, horizontally-scalable, and unopinionated Python backend that can handle REST and WebSocket endpoints. It can also perform database querying and other operations.
 I provided an example MongoDB integration with basic CRUD operations tied to a Discord bot.
 Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to its unopinionated nature, it is entirely modular and you can quite literally strip away the existing features built beyond `main.py` and make your own.
 
