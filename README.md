@@ -14,3 +14,7 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 
 - Please see [NeKoRoBOT.js](https://github.com/NeKoRoSYS/NeKoRoBOT.js/) for a full-stack Discord.js bot implementation.
 - Also used by our [proprietary matchmaking system](https://discord.gg/invite/cxjwAnWCjr), which also uses Discord.js.
+
+## Don't like Python?
+
+We have a [branch](https://github.com/NeKoRoSYS/NeKoRoPIE/tree/go) that uses Go insteaad of Python for native concurrency and is pretty much faster than Python.
