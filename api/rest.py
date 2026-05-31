@@ -60,7 +60,7 @@ async def discord_oauth_callback(payload: OAuthCallback):
 
     user = await db_controller.get_user_by_discord(discord_id)
     if not user:
-        pass
+        await db_controller.create_user(discord_id, discord_user.get("username"))
 
     expiration = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=7)
     jwt_payload = {
