@@ -10,7 +10,7 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 
 "Can I use NeKoRoPIE for anything?" Absolutely. Containerize it, put it in a VPS, add a content management system, or even real-time collaborative doc editing like Canva or Google Docs. Anything is possible.
 
-"How does it compare to Django?" Django is a Swiss Army Knife. NeKoRoPIE takes one blade from that Swiss Army Knife and sharpens it for absolute reliability. If for some reason you don't want to use Django and prefer to make build your own framework, NeKoRoPIE will suit your needs.
+"How does it compare to Django?" Django is a Swiss Army Knife. NeKoRoPIE takes one blade from that Swiss Army Knife and sharpens it for absolute reliability. If for some reason you don't want to use Django and prefer to build your own framework, NeKoRoPIE will suit your needs.
 
 - Please see [NeKoRoBOT.js](https://github.com/NeKoRoSYS/NeKoRoBOT.js/) for a full-stack Discord.js bot implementation.
 - Also used by our [proprietary matchmaking system](https://discord.gg/invite/cxjwAnWCjr), which also uses Discord.js.
