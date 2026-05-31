@@ -77,7 +77,7 @@ class Server:
         self.VALKEYURL = os.getenv('VALKEYURL', '')
         self.JWTSECRET = os.getenv('JWTSECRET', '')
         self.ORIGINS = os.getenv("ORIGINS").split(",")
-        if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.:
+        if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.ORIGINS:
             raise ValueError("FATAL ERROR: Environment variables are not set or empty in .env file.")
         
         self.ROUTES = ROUTES
