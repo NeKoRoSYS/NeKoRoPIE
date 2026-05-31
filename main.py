@@ -76,7 +76,8 @@ class Server:
         self.HEADER = os.getenv('CLIENTHEADER', '')
         self.VALKEYURL = os.getenv('VALKEYURL', '')
         self.JWTSECRET = os.getenv('JWTSECRET', '')
-        self.ORIGINS = os.getenv("ORIGINS").split(",")
+        raw_origins = os.getenv("ORIGINS", "")
+        self.ORIGINS = raw_origins.split(",") if raw_origins else []
         if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.ORIGINS:
             raise ValueError("FATAL ERROR: Environment variables are not set or empty in .env file.")
         
