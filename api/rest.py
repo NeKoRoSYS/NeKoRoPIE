@@ -1,4 +1,5 @@
 import datetime
+import secrets
 import os
 from fastapi import APIRouter, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -11,7 +12,7 @@ security = HTTPBearer()
 
 def verify_api_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     expected_token = os.getenv('APITOKEN')
-    if credentials.credentials != expected_token:
+    if not secrets.compare_digest(credentials.credentials, expected_token):
         raise HTTPException(status_code=401, detail="Invalid or missing API Token")
     return credentials.credentials
 
