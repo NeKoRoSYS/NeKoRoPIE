@@ -17,4 +17,4 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 
 ## Don't like Python?
 
-We have a [branch](https://github.com/NeKoRoSYS/NeKoRoPIE/tree/go) that uses Go insteaad of Python for native concurrency and is pretty much faster than Python.
+We have a [branch](https://github.com/NeKoRoSYS/NeKoRoPIE/tree/go) that uses Go instead of Python for native concurrency and is pretty much faster than Python.
