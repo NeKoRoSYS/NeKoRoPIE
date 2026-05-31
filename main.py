@@ -1,3 +1,4 @@
+from concurrent.futures import ProcessPoolExecutor
 import os # used to load env variables
 import time # used for dql
 import uuid # random identifiers
@@ -99,6 +100,7 @@ class Server:
         self.vk = None
         self.limiter = None
         self.pubsub_task = None
+        self.executor = ProcessPoolExecutor(max_workers=4)
         
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -108,13 +110,14 @@ class Server:
         self.vk = valkey.from_url(self.VALKEYURL, decode_responses=True)
         self.limiter = DistributedRateLimiter(self.vk, max_actions=25, timeframe=1.0)
         self.pubsub_task = asyncio.create_task(self._valkey_pubsub_listener())
-        self._cleanup_task = asyncio.create_task(self.__archiver())
+        self.dlq_cleanup_task = asyncio.create_task(self._dlq_archiver())
         yield
         if self.pubsub_task:
             self.pubsub_task.cancel()
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-        await asyncio.gather(self.pubsub_task, self._cleanup_task, return_exceptions=True)
+        if self.dlq_cleanup_task:
+            self.dlq_cleanup_task.cancel()
+        self.executor.shutdown(wait=True)
+        await asyncio.gather(self.pubsub_task, self.dlq_cleanup_task, return_exceptions=True)
         await self.vk.close()
     
     async def _dlq_archiver(self):
