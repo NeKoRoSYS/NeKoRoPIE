@@ -1,0 +1,25 @@
+# =========================================================== #
+# ENV CONFIG TEMPLATE                                         #
+# Copy this file to PROJECT_ROOT/.env and fill in your values #
+# PLEASE PLEAASE PLEASE do NOT ship this file to the public!  #
+# Only you and the server must know about its existence or    #
+# otherwise people will have access to your system and        #
+# sensitive data.                                             #
+# =========================================================== #
+
+# WebSockets API Configuration
+APIURL=http://localhost:8000/ws
+APITOKEN=your_secure_api_token_here
+CLIENTHEADER=ClientHeader/1.0
+JWTSECRET=random_64_char_string
+
+# Database Configuration (MongoDB)
+DBENGINE=mongodb
+DBURI=mongodb+srv://<username>:<password>@<cluster-url>/?retryWrites=true&w=majority&appName=YourAppName
+VALKEYPASSWORD=your_secure_valkey_password_here
+VALKEYURL=valkey://:${VALKEYPASSWORD}@valkey:6379
+# OR JUST TYPE THE PASSWORK DIRECTLY THE URL
+
+# Security
+SALT=your_random_salt_string_here
+# THIS HELPS WITH RANDOMIZING SECURE HASHES

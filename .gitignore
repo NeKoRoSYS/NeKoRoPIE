@@ -1,0 +1,10 @@
+# --- Python Specific ---
+__pycache__/
+*.pyc
+.venv/
+
+# --- App / Secrets ---
+.env
+*.log
+.vscode/
+
