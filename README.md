@@ -23,4 +23,4 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 
 ## Don't like Python?
 
-The Python server is as fast and thread-safe as it can be. It's exactly what you need for a web project, most of the time. Though, if you think your project is too heavy and needs to process features fast, we have a [branch](https://github.com/NeKoRoSYS/NeKoRoPIE/tree/go) that uses Go instead of Python for native concurrency and is pretty much faster than Python.
+The Python server is as fast and thread-safe as it can be. It's exactly what you need for a web project, most of the time. Though, if you think your project is too heavy and needs to process features fast, we have a [branch](https://github.com/NeKoRoSYS/NeKoRoPIE/tree/go) that uses Go instead of Python for native concurrency and is pretty much faster than Python. It is a faithful 1:1 port, slightly adjusted in favor of Go's capabilities and the available packages it uses.
