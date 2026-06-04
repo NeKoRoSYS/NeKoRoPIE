@@ -11,7 +11,7 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 ## Practical Usage Example
 
 - Please see [NeKoRoBOT.js](https://github.com/NeKoRoSYS/NeKoRoBOT.js/) for a full-stack Discord.js bot implementation.
-- Also used by our [proprietary matchmaking system](https://discord.gg/invite/cxjwAnWCjr), which also uses Discord.js.
+  -  Also used by our [proprietary matchmaking system](https://discord.gg/invite/cxjwAnWCjr), which also uses Discord.js.
 
 "Can I use NeKoRoPIE for anything?" Absolutely. Containerize it; put it in a VPS; shard instances; add a content management system; or even real-time collaborative doc editing, like Canva or Google Docs. Anything is possible.
 
