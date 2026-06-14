@@ -19,7 +19,7 @@ Every custom logic starts at `./api/rest.py` and `./api/websockets.py`. Due to i
 
 "How does it compare to Django?" Django is a Swiss Army Knife. NeKoRoPIE takes one blade from that Swiss Army Knife and sharpens it for absolute reliability. If for some reason you don't want to use Django and prefer to build your own framework, NeKoRoPIE will suit your needs.
 
-"How good is it?" I travelled back in time to meet Elon Musk and he was like "yo bro wtf I couldn've just used this instead when making PayPal's backend"
+"How good is it?" I travelled back in time to meet Elon Musk and he was like "yo bro wtf I could've just used this instead when making PayPal's backend"
 
 <br>
 
