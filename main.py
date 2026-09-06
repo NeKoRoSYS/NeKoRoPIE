@@ -7,13 +7,26 @@ import asyncio # put heavy tasks to background so it won't block the loop
 import logging # yes
 import secrets # used to compare env variables
 from dotenv import load_dotenv # uses os
-from pydantic import BaseModel, ValidationError # for strict schematics checking
+from pydantic_settings import BaseSettings, SettingsConfigDict # imports env variables
+from pydantic import BaseModel, Field, SecretStr, ValidationError # for strict schematics checking
 from contextlib import asynccontextmanager # for fastapi lifespan
 import valkey.asyncio as valkey # concurrency + off-load stuff to memory
 from api.rest import router as rest_router # custom rest api logic goes here
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect # rest api
 from fastapi.middleware.cors import CORSMiddleware # lets the react website/dashboard access the server
 from db.db_factory import db # to initialize database
+from api.websockets import ROUTES # custom websocket logic goes here
+
+class ServerEnv(BaseSettings):
+    token: str = Field(alias="APITOKEN")
+    header: str = Field(alias="CLIENTHEADER")
+    valkey_url: str = Field(alias="VALKEYURL")
+    jwt_secret: SecretStr = Field(alias="JWTSECRET")
+    origins: list[str] = Field(alias="ORIGINS")
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        extra="ignore"
+    )
 
 class BasePayload(BaseModel):
     action: str
@@ -21,8 +34,6 @@ class BasePayload(BaseModel):
 
 class HandshakePayload(BasePayload):
     token: str
-    
-from api.websockets import ROUTES # custom websocket logic goes here
 
 class DistributedRateLimiter:
     """Sliding-window rate limiter utilizing a distributed Valkey cluster."""
@@ -38,11 +49,11 @@ class DistributedRateLimiter:
         -- ARGV[3]: max allowed actions
         -- ARGV[4]: TTL for the key in seconds
 
-        redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
-        local current_count = redis.call('ZCARD', KEYS[1])
-        redis.call('EXPIRE', KEYS[1], ARGV[4])
+        server.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
+        local current_count = server.call('ZCARD', KEYS[1])
+        server.call('EXPIRE', KEYS[1], ARGV[4])
         if tonumber(current_count) < tonumber(ARGV[3]) then
-            redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1])
+            server.call('ZADD', KEYS[1], ARGV[1], ARGV[1])
             return 1 -- Allowed
         else
             return 0 -- Blocked
@@ -70,13 +81,13 @@ class DistributedRateLimiter:
 
 class Server:
     "The brain. You don't have to touch this unless you now what you're doing. Implement custom logic at 'root/core/api'. :D"
-    def __init__(self):
+    def __init__(self, env: ServerEnv):
         load_dotenv()
-        self.TOKEN = os.getenv('APITOKEN', '')
-        self.HEADER = os.getenv('CLIENTHEADER', '')
-        self.VALKEYURL = os.getenv('VALKEYURL', '')
-        self.JWTSECRET = os.getenv('JWTSECRET', '')
-        raw_origins = os.getenv("ORIGINS", "")
+        self.TOKEN = env.token
+        self.HEADER = env.header
+        self.VALKEYURL = env.valkey_url
+        self.JWTSECRET = env.jwt_secret
+        raw_origins = env.origins
         self.ORIGINS = raw_origins.split(",") if raw_origins else []
         if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.ORIGINS:
             raise ValueError("FATAL ERROR: Environment variables are not set or empty in .env file.")
@@ -144,41 +155,67 @@ class Server:
             except Exception as e:
                 logging.error(f"DLQ Archiver error: {e}")
             await asyncio.sleep(300)
+    
+    def _write_dlq_logs(self, key: str, messages: list):
+        """
+        Synchronously writes unrouted Dead Letter Queue (DLQ) messages to disk.
+        Executed in a separate thread to prevent blocking the async event loop.
+        """
+        log_dir = "dlq_archives"
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Sanitize the key (e.g., 'dlq:12345' becomes 'dlq_12345') to prevent path traversal issues
+        safe_name = key.replace(":", "_")
+        file_path = os.path.join(log_dir, f"{safe_name}.log")
+        
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        with open(file_path, "a", encoding="utf-8") as f:
+            for msg in messages:
+                # Ensure the message is a string before writing (Valkey might return bytes)
+                msg_str = msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace")
+                f.write(f"[{timestamp}] {msg_str}\n")
         
     async def _valkey_pubsub_listener(self):
         """Make multiple instances of the bot talk to each other. Listens ONLY to this specific instance's channel for incoming remote messages."""
         ps = self.vk.pubsub()
-        await ps.subscribe(self.CHANNELNAME)
-        logging.info(f"Instance {self.instance_id} subscribed to routing bus channel: {self.CHANNELNAME}")
         
-        try:
-            async for message in ps.listen():
-                if message["type"] != "message":
-                    continue
+        while True:
+            try:
+                await ps.subscribe(self.CHANNELNAME)
+                logging.info(f"Instance {self.instance_id} subscribed to routing bus channel: {self.CHANNELNAME}")
                 
-                try:
-                    packet = orjson.loads(message["data"])
-                    target_id = packet.get("target_client_id")
-                    payload_data = packet.get("data")
+                async for message in ps.listen():
+                    if message["type"] != "message":
+                        continue
                     
-                    target_queue = self.local_connections.get(target_id)
-                    if target_queue:
-                        await target_queue.put(orjson.dumps(payload_data))
-                    else:
-                        logging.warning(f"Client {target_id} offline. Pushing to DLQ.")
-                        dlq_key = f"dlq:{target_id}"
-                        await self.vk.rpush(dlq_key, orjson.dumps(payload_data))
-                        await self.vk.ltrim(dlq_key, -100, -1)
-                        # async with self.vk.pipeline(transaction=True) as pipe:
-                        #     pipe.rpush(dlq_key, orjson.dumps(payload_data))
-                        #     await pipe.execute()
-                            
-                except Exception as e:
-                    logging.error(f"Error distributing message payload over PubSub: {e}")
-        except asyncio.CancelledError:
-            logging.info("Valkey Pub/Sub listener routine shutdown smoothly.")
-        finally:
-            await ps.unsubscribe(self.CHANNELNAME)
+                    try:
+                        packet = orjson.loads(message["data"])
+                        target_id = packet.get("target_client_id")
+                        payload_data = packet.get("data")
+                        
+                        target_queue = self.local_connections.get(target_id)
+                        if target_queue:
+                            target_queue.put_nowait(orjson.dumps(payload_data))
+                        else:
+                            logging.warning(f"Client {target_id} offline. Pushing to DLQ.")
+                            dlq_key = f"dlq:{target_id}"
+                            async with self.vk.pipeline(transaction=True) as pipe:
+                                pipe.rpush(dlq_key, orjson.dumps(payload_data))
+                                pipe.ltrim(dlq_key, -100, -1)
+                                await pipe.execute()
+                                
+                    except Exception as e:
+                        logging.error(f"Error distributing message payload over PubSub: {e}")
+                        
+            except asyncio.CancelledError:
+                logging.info("Valkey Pub/Sub listener routine shutdown smoothly.")
+                await ps.unsubscribe(self.CHANNELNAME)
+                break 
+                
+            except Exception as e:
+                logging.error(f"Valkey Pub/Sub connection lost: {e}. Reconnecting in 5 seconds...")
+                await asyncio.sleep(5)
 
     async def route_message(self, target_client_id: str, payload_data: dict) -> bool:
         """
@@ -187,7 +224,7 @@ class Server:
         """
         if target_client_id in self.local_connections:
             try:
-                await self.local_connections[target_client_id].put(orjson.dumps(payload_data))
+                self.local_connections[target_client_id].put_nowait(orjson.dumps(payload_data))
                 return True
             except Exception as e:
                 logging.error(f"Failed to send local message to {target_client_id}: {e}")
@@ -263,8 +300,9 @@ class Server:
                 await websocket.close(code=1008, reason="Database Handshake Rejected")
                 return
 
-            egress_queue = asyncio.Queue()
+            egress_queue = asyncio.Queue(maxsize=100)
             self.local_connections[client_id] = egress_queue
+            
             await self.vk.set(f"client_route:{client_id}", self.instance_id)
             logging.info(f"Client {client_id} authenticated and routed to {self.instance_id}.")
 
@@ -281,12 +319,17 @@ class Server:
             writer_task = asyncio.create_task(socket_writer())
 
             dlq_key = f"dlq:{client_id}"
-            queued_msgs = await self.vk.lrange(dlq_key, 0, -1)
-            if queued_msgs:
-                for queued_msg in queued_msgs:
-                    await websocket.send_bytes(queued_msg)
-                await self.vk.delete(dlq_key)
-                logging.info(f"Delivered {len(queued_msgs)} DLQ messages to {client_id}")
+            delivered_count = 0
+            while True:
+                queued_msg = await self.vk.lpop(dlq_key)
+                if not queued_msg:
+                    break
+                
+                await websocket.send_bytes(queued_msg)
+                delivered_count += 1
+                
+            if delivered_count > 0:
+                logging.info(f"Delivered {delivered_count} DLQ messages to {client_id}")
             
             # dlq_key = f"dlq:{client_id}"
             # while True:
@@ -305,9 +348,9 @@ class Server:
             while True:
                 message = await websocket.receive_text()
                 
-                if len(message) > 1048576:  # 1 MB limit
-                    logging.warning(f"Payload from {client_id} exceeded limits.")
-                    continue
+                # if len(message) > 1048576:  # 1 MB limit
+                #     logging.warning(f"Payload from {client_id} exceeded limits.")
+                #     continue
 
                 if not await self.limiter.is_allowed(client_id):
                     await websocket.send_bytes(orjson.dumps({
@@ -356,11 +399,12 @@ class Server:
             
             if client_id:
                 self.local_connections.pop(client_id, None)
-                lua_script = "if valkey.call('get', KEYS[1]) == ARGV[1] then return valkey.call('del', KEYS[1]) else return 0 end"
+                lua_script = "if server.call('get', KEYS[1]) == ARGV[1] then return server.call('del', KEYS[1]) else return 0 end"
                 await self.vk.eval(lua_script, 1, f"client_route:{client_id}", self.instance_id)
                 await self.vk.delete(f"rate_limit:{client_id}")
 
-server = Server()
+settings = ServerEnv()
+server = Server(env=settings)
 app = server.app
 
 logging.basicConfig(
