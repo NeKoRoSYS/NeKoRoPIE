@@ -22,7 +22,7 @@ class ServerEnv(BaseSettings):
     header: str = Field(alias="CLIENTHEADER")
     valkey_url: str = Field(alias="VALKEYURL")
     jwt_secret: SecretStr = Field(alias="JWTSECRET")
-    origins: list[str] = Field(alias="ORIGINS")
+    origins: str = Field(alias="ORIGINS")
     model_config = SettingsConfigDict(
         env_file=".env", 
         extra="ignore"
@@ -86,9 +86,8 @@ class Server:
         self.TOKEN = env.token
         self.HEADER = env.header
         self.VALKEYURL = env.valkey_url
-        self.JWTSECRET = env.jwt_secret
-        raw_origins = env.origins
-        self.ORIGINS = raw_origins.split(",") if raw_origins else []
+        self.JWTSECRET = env.jwt_secret.get_secret_value()
+        self.ORIGINS = env.origins.split(",") if env.origins else []
         if not self.TOKEN or not self.HEADER or not self.VALKEYURL or not self.JWTSECRET or not self.ORIGINS:
             raise ValueError("FATAL ERROR: Environment variables are not set or empty in .env file.")
         
@@ -129,31 +128,41 @@ class Server:
         await self.vk.close()
     
     async def _dlq_archiver(self):
-        """This is for messages that the server couldn't process while or after it dies. It periodically sweeps unresolved DLQs and archives them."""
         await asyncio.sleep(10)
         
         while True:
             try:
-                async for key in self.vk.scan_iter(match="dlq:*"):
-                    messages = []
+                lock = await self.vk.set("lock:dlq_archiver", self.instance_id, nx=True, ex=300)
+                
+                if not lock:
+                    await asyncio.sleep(60)
+                    continue
                     
+                async for key in self.vk.scan_iter(match="dlq:*"):
                     while True:
-                        msg = await self.vk.lpop(key)
-                        if not msg:
+                        messages = []
+                        for _ in range(100):
+                            msg = await self.vk.lpop(key)
+                            if not msg:
+                                break
+                            messages.append(msg)
+                            
+                        if not messages:
                             break
-                        messages.append(msg)
-                        
-                    if messages:
+                            
                         try:
                             await asyncio.to_thread(self._write_dlq_logs, key, messages)
-                            logging.warning(f"Archived {len(messages)} dropped messages from {key}")
+                            logging.info(f"Archived chunk of {len(messages)} messages from {key}")
                         except Exception as io_err:
                             logging.error(f"Failed to write DLQ logs to disk: {io_err}")
-                        
+                
+                await self.vk.delete("lock:dlq_archiver")
+                            
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logging.error(f"DLQ Archiver error: {e}")
+                
             await asyncio.sleep(300)
     
     def _write_dlq_logs(self, key: str, messages: list):
@@ -164,7 +173,6 @@ class Server:
         log_dir = "dlq_archives"
         os.makedirs(log_dir, exist_ok=True)
         
-        # Sanitize the key (e.g., 'dlq:12345' becomes 'dlq_12345') to prevent path traversal issues
         safe_name = key.replace(":", "_")
         file_path = os.path.join(log_dir, f"{safe_name}.log")
         
@@ -172,7 +180,6 @@ class Server:
         
         with open(file_path, "a", encoding="utf-8") as f:
             for msg in messages:
-                # Ensure the message is a string before writing (Valkey might return bytes)
                 msg_str = msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace")
                 f.write(f"[{timestamp}] {msg_str}\n")
         
@@ -196,7 +203,15 @@ class Server:
                         
                         target_queue = self.local_connections.get(target_id)
                         if target_queue:
-                            target_queue.put_nowait(orjson.dumps(payload_data))
+                            try:
+                                target_queue.put_nowait(orjson.dumps(payload_data))
+                            except asyncio.QueueFull:
+                                logging.warning(f"Client {target_id} queue full. Pushing to DLQ.")
+                                dlq_key = f"dlq:{target_id}"
+                                async with self.vk.pipeline(transaction=True) as pipe:
+                                    pipe.rpush(dlq_key, orjson.dumps(payload_data))
+                                    pipe.ltrim(dlq_key, -100, -1)
+                                    await pipe.execute()
                         else:
                             logging.warning(f"Client {target_id} offline. Pushing to DLQ.")
                             dlq_key = f"dlq:{target_id}"
@@ -232,7 +247,13 @@ class Server:
 
         target_instance_id = await self.vk.get(f"client_route:{target_client_id}")
         
-        if target_instance_id:
+        if target_instance_id is None:
+            dlq_key = f"dlq:{target_client_id}"
+            async with self.vk.pipeline(transaction=True) as pipe:
+                pipe.rpush(dlq_key, orjson.dumps(payload_data))
+                pipe.ltrim(dlq_key, -100, -1)
+                await pipe.execute()
+        elif target_instance_id:
             packet = {
                 "target_client_id": target_client_id,
                 "data": payload_data
@@ -288,8 +309,8 @@ class Server:
             
             try:
                 decoded = jwt.decode(token, self.JWTSECRET, algorithms=["HS256"])
-                client_id = str(decoded.get("sub"))
-                if not client_id:
+                decoded_client_id = decoded.get("sub")
+                if not decoded_client_id:
                     raise ValueError("JWT missing 'sub' claim")
             except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
                 await websocket.close(code=1008, reason=f"Invalid Token: {e}")
@@ -300,6 +321,7 @@ class Server:
                 await websocket.close(code=1008, reason="Database Handshake Rejected")
                 return
 
+            client_id = str(decoded_client_id)
             egress_queue = asyncio.Queue(maxsize=100)
             self.local_connections[client_id] = egress_queue
             
@@ -346,7 +368,11 @@ class Server:
         
         try:
             while True:
-                message = await websocket.receive_text()
+                try:
+                    message = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
+                except asyncio.TimeoutError:
+                    logging.warning(f"Client {client_id} timed out. Closing ghost socket.")
+                    break
                 
                 # if len(message) > 1048576:  # 1 MB limit
                 #     logging.warning(f"Payload from {client_id} exceeded limits.")
@@ -365,6 +391,9 @@ class Server:
                     if not isinstance(payload, dict):
                         raise ValueError("Payload is not a dictionary")
                     data = BasePayload(**payload)
+                    if data.action == "ping":
+                        await websocket.send_bytes(orjson.dumps({"action": "pong"}))
+                        continue
                 except (orjson.JSONDecodeError, ValidationError, ValueError) as e:
                     logging.error(f"Dropped malformed base payload: {e}")
                     continue
@@ -402,6 +431,11 @@ class Server:
                 lua_script = "if server.call('get', KEYS[1]) == ARGV[1] then return server.call('del', KEYS[1]) else return 0 end"
                 await self.vk.eval(lua_script, 1, f"client_route:{client_id}", self.instance_id)
                 await self.vk.delete(f"rate_limit:{client_id}")
+                
+            try:
+                await websocket.close()
+            except RuntimeError:
+                pass
 
 settings = ServerEnv()
 server = Server(env=settings)
