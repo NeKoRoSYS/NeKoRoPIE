@@ -312,7 +312,7 @@ class Server:
                 decoded_client_id = decoded.get("sub")
                 if not decoded_client_id:
                     raise ValueError("JWT missing 'sub' claim")
-            except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
+            except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, ValueError) as e:
                 await websocket.close(code=1008, reason=f"Invalid Token: {e}")
                 return
             
